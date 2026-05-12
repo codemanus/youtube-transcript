@@ -30,6 +30,44 @@ make release-linux
 
 Copy `dist/youtube-transcript-linux-amd64` to the server, e.g. `/usr/local/bin/youtube-transcript`.
 
+## Updating from GitHub
+
+After you have a **git clone** on the machine (laptop or LXC), you can refresh from `origin` and rebuild in one step.
+
+### On your dev machine (macOS / Linux desktop)
+
+```bash
+cd /path/to/youtube-transcript
+make update
+```
+
+Runs `git pull --ff-only` then `make build` (npm + Vite + embedded UI + native Go binary).
+
+### On the LXC (clone lives on the guest, has Go 1.25+ and Node/npm)
+
+**Option A — Makefile only** (install the binary yourself or you already use systemd with a fixed path):
+
+```bash
+cd /opt/youtube-transcript   # or wherever you cloned
+make update-release-host
+BIN=$(make -s print-release-binary)
+sudo install -m 755 "$BIN" /usr/local/bin/youtube-transcript
+sudo systemctl restart youtube-transcript
+```
+
+Use `make update-release-host` so the binary matches **amd64 vs arm64** automatically (`release-for-host` writes `dist/youtube-transcript-linux-<arch>`).
+
+**Option B — One script** (pull, build, install, restart):
+
+```bash
+cd /opt/youtube-transcript
+SYSTEMD_UNIT=youtube-transcript ./scripts/update-service.sh
+```
+
+Optional: `INSTALL_BIN=/usr/local/bin/youtube-transcript` (default), `GIT_BRANCH=main` to merge `origin/main` explicitly after `git fetch`. Run **without** `sudo` on the whole script so `git pull` uses your SSH keys; the script uses `sudo` only for `install` and `systemctl`.
+
+**Option C — Build on laptop, copy binary only** (saves RAM/disk on tiny LXC): on the laptop run `git pull && make release-linux` (or `release-linux-arm64`), then `scp dist/youtube-transcript-linux-amd64 user@lxc:/tmp/` and install there.
+
 ## Configuration
 
 | Environment variable | Meaning | Default |
