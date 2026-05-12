@@ -5,9 +5,11 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/codychambers/youtube-transcript/backend/internal/apilog"
 	"github.com/codychambers/youtube-transcript/backend/internal/videoid"
+	"github.com/codychambers/youtube-transcript/backend/internal/youtubeoembed"
 	youtube "github.com/rahadiangg/youtube-transcript-go/youtube"
 )
 
@@ -32,17 +35,21 @@ const (
 )
 
 type transcriptRequest struct {
-	URL  string `json:"url"`
-	Lang string `json:"lang"`
+	URL               string `json:"url"`
+	Lang              string `json:"lang"`
+	IncludeTimestamps bool   `json:"includeTimestamps"`
 }
 
 type transcriptResponse struct {
-	VideoID      string `json:"videoId"`
-	Lang         string `json:"lang"`
-	Language     string `json:"language"`
-	IsGenerated  bool   `json:"isGenerated"`
-	Text         string `json:"text"`
-	SnippetCount int    `json:"snippetCount"`
+	VideoID         string  `json:"videoId"`
+	VideoTitle      string  `json:"videoTitle,omitempty"`
+	ChannelTitle    string  `json:"channelTitle,omitempty"`
+	Lang            string  `json:"lang"`
+	Language        string  `json:"language"`
+	IsGenerated     bool    `json:"isGenerated"`
+	Text            string  `json:"text"`
+	TextTimestamped *string `json:"textTimestamped,omitempty"`
+	SnippetCount    int     `json:"snippetCount"`
 }
 
 type errorResponse struct {
@@ -148,6 +155,17 @@ func handleTranscript(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
 
+	type oembedOut struct {
+		title, channel string
+	}
+	oembedCh := make(chan oembedOut, 1)
+	go func() {
+		oeCtx, oeCancel := context.WithTimeout(ctx, 8*time.Second)
+		defer oeCancel()
+		t, c := youtubeoembed.Fetch(oeCtx, videoID)
+		oembedCh <- oembedOut{t, c}
+	}()
+
 	type result struct {
 		ft  *youtube.FetchedTranscript
 		err error
@@ -175,16 +193,31 @@ func handleTranscript(w http.ResponseWriter, r *http.Request) {
 		ft = res.ft
 	}
 
+	var videoTitle, channelTitle string
+	select {
+	case oe := <-oembedCh:
+		videoTitle, channelTitle = oe.title, oe.channel
+	case <-time.After(8 * time.Second):
+	}
+
 	text := joinTranscriptText(ft.Snippets)
-	apilog.Info("transcript ok video=%s lines=%d lang=%s generated=%v", videoID, len(ft.Snippets), ft.LanguageCode, ft.IsGenerated)
-	_ = json.NewEncoder(w).Encode(transcriptResponse{
+	resp := transcriptResponse{
 		VideoID:      ft.VideoID,
+		VideoTitle:   videoTitle,
+		ChannelTitle: channelTitle,
 		Lang:         ft.LanguageCode,
 		Language:     ft.Language,
 		IsGenerated:  ft.IsGenerated,
 		Text:         text,
 		SnippetCount: len(ft.Snippets),
-	})
+	}
+	if req.IncludeTimestamps {
+		ts := joinTranscriptTextTimestamped(ft.Snippets)
+		resp.TextTimestamped = &ts
+	}
+
+	apilog.Info("transcript ok video=%s lines=%d lang=%s generated=%v title=%q", videoID, len(ft.Snippets), ft.LanguageCode, ft.IsGenerated, videoTitle)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func languageCodes(lang string) []string {
@@ -203,6 +236,38 @@ func languageCodes(lang string) []string {
 		return []string{"en"}
 	}
 	return out
+}
+
+func joinTranscriptTextTimestamped(snippets []youtube.FetchedTranscriptSnippet) string {
+	var b strings.Builder
+	for _, sn := range snippets {
+		line := strings.TrimSpace(sn.Text)
+		if line == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		sec := int(math.Floor(sn.Start + 1e-9))
+		b.WriteString(formatTranscriptTimestamp(sec))
+		b.WriteByte(' ')
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+// formatTranscriptTimestamp uses [mm:ss] below one hour, else [hh:mm:ss] (floor seconds).
+func formatTranscriptTimestamp(sec int) string {
+	if sec < 0 {
+		sec = 0
+	}
+	h := sec / 3600
+	m := (sec % 3600) / 60
+	s := sec % 60
+	if h > 0 {
+		return fmt.Sprintf("[%02d:%02d:%02d]", h, m, s)
+	}
+	return fmt.Sprintf("[%02d:%02d]", m, s)
 }
 
 func joinTranscriptText(snippets []youtube.FetchedTranscriptSnippet) string {

@@ -1,10 +1,13 @@
 <script lang="ts">
 	type TranscriptResponse = {
 		videoId: string;
+		videoTitle?: string;
+		channelTitle?: string;
 		lang: string;
 		language: string;
 		isGenerated: boolean;
 		text: string;
+		textTimestamped?: string;
 		snippetCount: number;
 	};
 
@@ -19,6 +22,17 @@
 	let result = $state<TranscriptResponse | null>(null);
 
 	let logOpen = $state(false);
+	let includeTimestamps = $state(false);
+
+	function displayBody(r: TranscriptResponse): string {
+		if (includeTimestamps && r.textTimestamped) return r.textTimestamped;
+		return r.text;
+	}
+
+	function safeFileSlug(r: TranscriptResponse): string {
+		const raw = (r.videoTitle ?? r.videoId).replace(/[^\w\-]+/g, '-').replace(/^-|-$/g, '');
+		return raw.slice(0, 80) || r.videoId;
+	}
 	let logEntries = $state<LogEntry[]>([]);
 	let logErr = $state('');
 	let logPre = $state<HTMLPreElement | null>(null);
@@ -85,7 +99,8 @@
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					url: urlInput.trim(),
-					lang: langInput.trim() || 'en'
+					lang: langInput.trim() || 'en',
+					includeTimestamps
 				})
 			});
 			const raw = await res.text();
@@ -121,20 +136,24 @@
 	}
 
 	async function copyText() {
-		if (!result?.text) return;
+		if (!result) return;
+		const body = displayBody(result);
+		if (!body) return;
 		try {
-			await navigator.clipboard.writeText(result.text);
+			await navigator.clipboard.writeText(body);
 		} catch {
 			errorMsg = 'Could not copy to clipboard';
 		}
 	}
 
 	function downloadText() {
-		if (!result?.text) return;
-		const blob = new Blob([result.text], { type: 'text/plain;charset=utf-8' });
+		if (!result) return;
+		const body = displayBody(result);
+		if (!body) return;
+		const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
 		const a = document.createElement('a');
 		a.href = URL.createObjectURL(blob);
-		a.download = `${result.videoId}-transcript.txt`;
+		a.download = `${safeFileSlug(result)}-transcript.txt`;
 		a.click();
 		URL.revokeObjectURL(a.href);
 	}
@@ -166,6 +185,10 @@
 			<span>Language code(s)</span>
 			<input type="text" bind:value={langInput} placeholder="en or de,en for fallback" />
 		</label>
+		<label class="field row">
+			<input type="checkbox" bind:checked={includeTimestamps} />
+			<span>Include timestamps (lines start with <code>[mm:ss]</code> or <code>[hh:mm:ss]</code>); submit again after toggling</span>
+		</label>
 		<button type="submit" disabled={loading}> {loading ? 'Fetching…' : 'Get transcript'} </button>
 	</form>
 
@@ -175,8 +198,14 @@
 
 	{#if result}
 		<section class="card meta" aria-live="polite">
+			{#if result.videoTitle}
+				<p class="video-title">{result.videoTitle}</p>
+			{/if}
+			{#if result.channelTitle}
+				<p class="channel-line"><strong>Channel</strong> {result.channelTitle}</p>
+			{/if}
 			<p>
-				<strong>Video</strong>
+				<strong>Video ID</strong>
 				<code>{result.videoId}</code>
 			</p>
 			<p>
@@ -188,7 +217,7 @@
 				<button type="button" onclick={() => void copyText()}>Copy</button>
 				<button type="button" onclick={() => downloadText()}>Download .txt</button>
 			</div>
-			<textarea readonly rows="18">{result.text}</textarea>
+			<textarea readonly rows="18">{displayBody(result)}</textarea>
 		</section>
 	{/if}
 
@@ -263,6 +292,37 @@
 		border-radius: 8px;
 		border: 1px solid #d1d5db;
 		background: #fff;
+	}
+
+	.field.row {
+		flex-direction: row;
+		align-items: flex-start;
+		gap: 0.5rem;
+	}
+
+	.field.row input[type='checkbox'] {
+		margin-top: 0.2rem;
+	}
+
+	.field.row span {
+		font-weight: 400;
+		color: #4b5563;
+		font-size: 0.85rem;
+		line-height: 1.4;
+	}
+
+	.video-title {
+		font-size: 1.1rem;
+		font-weight: 650;
+		margin: 0 0 0.35rem;
+		color: #111827;
+		line-height: 1.35;
+	}
+
+	.channel-line {
+		margin: 0 0 0.5rem;
+		font-size: 0.9rem;
+		color: #374151;
 	}
 
 	.field input:focus {

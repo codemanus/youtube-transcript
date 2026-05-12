@@ -109,12 +109,32 @@ If the browser shows **502** on `/api/...` in dev, the **hooks proxy** could not
 `POST /api/transcript`
 
 ```json
-{ "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "lang": "en" }
+{
+  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "lang": "en",
+  "includeTimestamps": false
+}
 ```
 
-Optional `lang`: single code (e.g. `en`) or comma-separated fallbacks (e.g. `de,en`).
+| Field | Required | Description |
+|-------|----------|-------------|
+| `url` | yes | YouTube watch URL, short URL, embed path, or bare 11-character video ID |
+| `lang` | no | Language code or comma-separated fallbacks (default `en`) |
+| `includeTimestamps` | no | If `true`, response includes `textTimestamped`: each non-empty cue line is `[mm:ss]` or `[hh:mm:ss]` (floor of start time in seconds) followed by the caption text |
 
-Success: `200` with `videoId`, `lang`, `language`, `isGenerated`, `text`, `snippetCount`.
+**Success `200`** JSON fields:
+
+| Field | Description |
+|-------|-------------|
+| `videoId` | 11-character ID |
+| `videoTitle` | Human-readable title from YouTube oEmbed (omitted if oEmbed fails) |
+| `channelTitle` | Channel / author name from oEmbed (omitted if unavailable) |
+| `lang`, `language`, `isGenerated` | Caption track metadata |
+| `text` | Plain transcript (newline-separated cues) |
+| `textTimestamped` | Present only when `includeTimestamps` was `true` |
+| `snippetCount` | Number of caption segments |
+
+Timestamps use the **start** of each cue in seconds (floored). Duration is not repeated on each line.
 
 **Debug (trusted networks):** `GET /api/logs?limit=120` returns recent server log lines (same entries as `journald`’s `[api]` lines, capped in memory). `POST /api/logs/clear` empties that buffer. The web UI can show this under **Show server log**.
 
