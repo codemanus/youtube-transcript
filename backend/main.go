@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/codychambers/youtube-transcript/backend/internal/apilog"
+	"github.com/codychambers/youtube-transcript/backend/internal/transcriptapi"
 	"github.com/codychambers/youtube-transcript/backend/internal/videoid"
 	"github.com/codychambers/youtube-transcript/backend/internal/youtubeoembed"
 	youtube "github.com/rahadiangg/youtube-transcript-go/youtube"
@@ -33,28 +34,6 @@ const (
 	requestTimeout     = 45 * time.Second
 	rateLimitPerMinute = 30
 )
-
-type transcriptRequest struct {
-	URL               string `json:"url"`
-	Lang              string `json:"lang"`
-	IncludeTimestamps bool   `json:"includeTimestamps"`
-}
-
-type transcriptResponse struct {
-	VideoID         string  `json:"videoId"`
-	VideoTitle      string  `json:"videoTitle,omitempty"`
-	ChannelTitle    string  `json:"channelTitle,omitempty"`
-	Lang            string  `json:"lang"`
-	Language        string  `json:"language"`
-	IsGenerated     bool    `json:"isGenerated"`
-	Text            string  `json:"text"`
-	TextTimestamped *string `json:"textTimestamped,omitempty"`
-	SnippetCount    int     `json:"snippetCount"`
-}
-
-type errorResponse struct {
-	Error string `json:"error"`
-}
 
 type logsResponse struct {
 	Entries []apilog.Entry `json:"entries"`
@@ -130,7 +109,7 @@ func handleTranscript(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 
-	var req transcriptRequest
+	var req transcriptapi.Request
 	if err := dec.Decode(&req); err != nil {
 		apilog.Warn("transcript bad json from %s: %v", r.RemoteAddr, err)
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -201,7 +180,7 @@ func handleTranscript(w http.ResponseWriter, r *http.Request) {
 	}
 
 	text := joinTranscriptText(ft.Snippets)
-	resp := transcriptResponse{
+	resp := transcriptapi.Response{
 		VideoID:      ft.VideoID,
 		VideoTitle:   videoTitle,
 		ChannelTitle: channelTitle,
@@ -319,7 +298,7 @@ func mapYouTubeError(err error) (int, string) {
 
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(errorResponse{Error: msg})
+	_ = json.NewEncoder(w).Encode(transcriptapi.ErrorResponse{Error: msg})
 }
 
 func logRequest(next http.Handler) http.Handler {
