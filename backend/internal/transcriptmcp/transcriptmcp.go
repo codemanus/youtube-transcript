@@ -104,13 +104,7 @@ func (t *transcriptTool) call(ctx context.Context, _ *mcp.CallToolRequest, in tr
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp transcriptapi.ErrorResponse
-		_ = json.Unmarshal(respBody, &errResp)
-		msg := errResp.Error
-		if msg == "" {
-			msg = strings.TrimSpace(string(respBody))
-		}
-		return errorResult(fmt.Sprintf("transcript service returned %d: %s", resp.StatusCode, msg)), nil, nil
+		return errorResult(serviceErrorMessage(resp.StatusCode, respBody)), nil, nil
 	}
 
 	var out transcriptapi.Response
@@ -121,6 +115,24 @@ func (t *transcriptTool) call(ctx context.Context, _ *mcp.CallToolRequest, in tr
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: formatResult(&out, includeTimestamps)}},
 	}, nil, nil
+}
+
+// serviceErrorMessage builds the isError text for a non-2xx response,
+// including the status and, when present, the service's own {error} message
+// (or its raw body, if that doesn't parse as the expected shape).
+func serviceErrorMessage(status int, body []byte) string {
+	var errResp transcriptapi.ErrorResponse
+	msg := ""
+	if json.Unmarshal(body, &errResp) == nil {
+		msg = errResp.Error
+	}
+	if msg == "" {
+		msg = strings.TrimSpace(string(body))
+	}
+	if msg == "" {
+		return fmt.Sprintf("transcript service returned %d", status)
+	}
+	return fmt.Sprintf("transcript service returned %d: %s", status, msg)
 }
 
 func errorResult(msg string) *mcp.CallToolResult {

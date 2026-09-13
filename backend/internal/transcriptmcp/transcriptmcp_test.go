@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -265,5 +266,131 @@ func TestCallTool(t *testing.T) {
 				t.Errorf("result text =\n%s\nwant\n%s", got, tt.wantText)
 			}
 		})
+	}
+}
+
+func TestCallToolServiceError(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantMsg string
+	}{
+		{
+			name:    "400 with error body",
+			status:  http.StatusBadRequest,
+			body:    `{"error":"url is required"}`,
+			wantMsg: "transcript service returned 400: url is required",
+		},
+		{
+			name:    "403 with error body",
+			status:  http.StatusForbidden,
+			body:    `{"error":"video is age-restricted; transcripts need auth"}`,
+			wantMsg: "transcript service returned 403: video is age-restricted; transcripts need auth",
+		},
+		{
+			name:    "404 with error body",
+			status:  http.StatusNotFound,
+			body:    `{"error":"no transcript for that language (or none available)"}`,
+			wantMsg: "transcript service returned 404: no transcript for that language (or none available)",
+		},
+		{
+			name:    "429 with error body",
+			status:  http.StatusTooManyRequests,
+			body:    `{"error":"rate limit exceeded; try again shortly"}`,
+			wantMsg: "transcript service returned 429: rate limit exceeded; try again shortly",
+		},
+		{
+			name:    "503 with error body",
+			status:  http.StatusServiceUnavailable,
+			body:    `{"error":"could not retrieve transcript (network error or unexpected response from YouTube)"}`,
+			wantMsg: "transcript service returned 503: could not retrieve transcript (network error or unexpected response from YouTube)",
+		},
+		{
+			name:    "504 with error body",
+			status:  http.StatusGatewayTimeout,
+			body:    `{"error":"request timed out"}`,
+			wantMsg: "transcript service returned 504: request timed out",
+		},
+		{
+			name:    "non-2xx with unparseable body still reports the status",
+			status:  http.StatusInternalServerError,
+			body:    "<html>upstream broke</html>",
+			wantMsg: "transcript service returned 500: <html>upstream broke</html>",
+		},
+		{
+			name:    "non-2xx with empty body still reports the status",
+			status:  http.StatusBadGateway,
+			body:    "",
+			wantMsg: "transcript service returned 502",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cs := newTestSession(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+
+			res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+				Name:      toolName,
+				Arguments: map[string]any{"url": "https://youtu.be/abc12345678"},
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("want isError, got success: %s", textContent(t, res))
+			}
+			if got := textContent(t, res); got != tt.wantMsg {
+				t.Errorf("error text = %q, want %q", got, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func TestCallToolUnreachable(t *testing.T) {
+	// Start and immediately close a real server so baseURL is a valid-looking
+	// address that nothing is listening on.
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	baseURL := httpSrv.URL
+	httpSrv.Close()
+
+	server := NewServer(baseURL, http.DefaultClient)
+
+	ctx := context.Background()
+	t1, t2 := mcp.NewInMemoryTransports()
+
+	serverSession, err := server.Connect(ctx, t1, nil)
+	if err != nil {
+		t.Fatalf("server.Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = serverSession.Wait() })
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatalf("client.Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = clientSession.Close() })
+
+	res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name:      toolName,
+		Arguments: map[string]any{"url": "https://youtu.be/abc12345678"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("want isError, got success: %s", textContent(t, res))
+	}
+
+	got := textContent(t, res)
+	if !strings.Contains(got, baseURL) {
+		t.Errorf("error text %q does not name the configured address %q", got, baseURL)
+	}
+	if !strings.Contains(got, "LAN/VPN") {
+		t.Errorf("error text %q does not hint that the Mac may be off the LAN/VPN", got)
 	}
 }
