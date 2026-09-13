@@ -20,8 +20,10 @@ import (
 
 	"github.com/codychambers/youtube-transcript/backend/internal/apilog"
 	"github.com/codychambers/youtube-transcript/backend/internal/transcriptapi"
+	"github.com/codychambers/youtube-transcript/backend/internal/transcriptmcp"
 	"github.com/codychambers/youtube-transcript/backend/internal/videoid"
 	"github.com/codychambers/youtube-transcript/backend/internal/youtubeoembed"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	youtube "github.com/rahadiangg/youtube-transcript-go/youtube"
 )
 
@@ -33,6 +35,10 @@ const (
 	defaultListen      = ":8080"
 	requestTimeout     = 45 * time.Second
 	rateLimitPerMinute = 30
+
+	// mcpClientTimeout is comfortably above the service's own requestTimeout so
+	// the service's own 504 response surfaces instead of a client-side timeout.
+	mcpClientTimeout = 90 * time.Second
 )
 
 type logsResponse struct {
@@ -40,6 +46,30 @@ type logsResponse struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		runMCPServer()
+		return
+	}
+	runHTTPServer()
+}
+
+// runMCPServer serves get_youtube_transcript over stdio. Only protocol
+// messages go to stdout; diagnostics go to stderr via the log package.
+func runMCPServer() {
+	baseURL, err := transcriptmcp.BaseURLFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	client := &http.Client{Timeout: mcpClientTimeout}
+	server := transcriptmcp.NewServer(baseURL, client)
+
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func runHTTPServer() {
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = defaultListen
