@@ -21,6 +21,7 @@ import (
 	"github.com/codychambers/youtube-transcript/backend/internal/apilog"
 	"github.com/codychambers/youtube-transcript/backend/internal/churchguideapi"
 	"github.com/codychambers/youtube-transcript/backend/internal/groupsportal"
+	"github.com/codychambers/youtube-transcript/backend/internal/portalcookie"
 	"github.com/codychambers/youtube-transcript/backend/internal/transcriptapi"
 	"github.com/codychambers/youtube-transcript/backend/internal/transcriptmcp"
 	"github.com/codychambers/youtube-transcript/backend/internal/videoid"
@@ -304,9 +305,12 @@ func handleChurchGuidePDF(w http.ResponseWriter, r *http.Request) {
 }
 
 func newGroupsPortalClient() (*groupsportal.Client, error) {
-	cookie, err := groupsportal.SessionCookieFromEnv()
+	cookie, _, configured, err := portalcookie.Read()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read groups portal cookie: %w", err)
+	}
+	if !configured {
+		return nil, errors.New("no groups portal session cookie is configured; run scripts/update-groups-portal-cookie.sh to set one")
 	}
 	return groupsportal.NewClient(groupsportal.DefaultBaseURL, cookie, &http.Client{Timeout: requestTimeout}), nil
 }
@@ -314,7 +318,7 @@ func newGroupsPortalClient() (*groupsportal.Client, error) {
 func mapGroupsPortalError(err error) (int, string) {
 	switch {
 	case errors.Is(err, groupsportal.ErrSessionExpired):
-		return http.StatusUnauthorized, fmt.Sprintf("groups portal session expired or invalid; refresh %s", groupsportal.SessionCookieEnvVar)
+		return http.StatusUnauthorized, "groups portal session expired or invalid; refresh it with scripts/update-groups-portal-cookie.sh"
 	case errors.Is(err, groupsportal.ErrNoPDF):
 		return http.StatusNotFound, err.Error()
 	default:

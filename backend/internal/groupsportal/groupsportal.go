@@ -1,7 +1,7 @@
 // Package groupsportal fetches the current week's Church Guide from the
 // Groups Portal (mycgconnect.com). It authenticates with a session cookie
-// value (not credentials) supplied by the caller; SessionCookieFromEnv reads
-// the cookie Cody refreshes by hand (see docs/adr/0001).
+// value (not credentials) supplied by the caller; see the portalcookie
+// package for how that cookie is stored and refreshed.
 package groupsportal
 
 import (
@@ -11,18 +11,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path"
 	"strings"
 )
 
 // DefaultBaseURL is the Groups Portal's public address.
 const DefaultBaseURL = "https://mycgconnect.com"
-
-// SessionCookieEnvVar names the environment variable holding the Groups
-// Portal session cookie (the literal Cookie header value, e.g.
-// "connect.sid=s%3A...").
-const SessionCookieEnvVar = "GROUPS_PORTAL_SESSION_COOKIE"
 
 // ErrSessionExpired is returned when the portal rejects the configured
 // session cookie (401/403), meaning it has expired or is invalid.
@@ -37,16 +31,6 @@ const (
 	maxCurrentBytes = 2 * 1024 * 1024  // JSON metadata + editedContent
 	maxPDFBytes     = 25 * 1024 * 1024 // a Church Guide PDF is a few pages
 )
-
-// SessionCookieFromEnv reads and validates GROUPS_PORTAL_SESSION_COOKIE. It
-// returns an error naming the variable when it is unset.
-func SessionCookieFromEnv() (string, error) {
-	v := strings.TrimSpace(os.Getenv(SessionCookieEnvVar))
-	if v == "" {
-		return "", fmt.Errorf("%s is not set; copy the Cookie header value from an authenticated browser session at %s", SessionCookieEnvVar, DefaultBaseURL)
-	}
-	return v, nil
-}
 
 // Client fetches the Church Guide from a Groups Portal instance.
 type Client struct {
