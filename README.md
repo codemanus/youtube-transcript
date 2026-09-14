@@ -30,6 +30,57 @@ make release-linux
 
 Copy `dist/youtube-transcript-linux-amd64` to the server, e.g. `/usr/local/bin/youtube-transcript`.
 
+## MCP server (Claude Desktop / Cowork)
+
+The same binary can run as a local stdio MCP server exposing one tool, `get_youtube_transcript`, so that Claude Desktop (and Cowork, which bridges through it) can fetch transcripts from the transcript service on your LAN/VPN. This only works on a Mac that can reach the service directly — Cowork's sandbox cannot, which is exactly the gap this closes.
+
+### Install
+
+```bash
+make install-local
+```
+
+This runs the full native build (frontend, embedded static, Go binary), then installs the binary to `~/.local/bin/youtube-transcript`, creating the directory if needed. Rebuilding and reinstalling doesn't change this path, so your Claude Desktop config never needs to be updated after the first setup.
+
+### Register in Claude Desktop
+
+Add an entry to `claude_desktop_config.json` (in Claude Desktop, **Settings → Developer → Edit Config**). Use the absolute path from the install step above, and point `TRANSCRIPT_API_URL` at your transcript service (replace the placeholder LAN address below with your own):
+
+```json
+{
+  "mcpServers": {
+    "youtube-transcript": {
+      "command": "/Users/<you>/.local/bin/youtube-transcript",
+      "args": ["mcp"],
+      "env": {
+        "TRANSCRIPT_API_URL": "http://192.0.2.10:8080"
+      }
+    }
+  }
+}
+```
+
+**Restart Claude Desktop** after editing the config for it to pick up the new server.
+
+### Tool contract: `get_youtube_transcript`
+
+**Input:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `url` | yes | YouTube watch URL, short URL, embed path, or bare 11-character video ID |
+| `lang` | no | Language code or comma-separated fallbacks (default `en`, per the service) |
+| `includeTimestamps` | no | Include `[mm:ss]` timestamps. **Default `true`** (the MCP layer always sends an explicit value to the service) |
+
+**Success result:** a single text content block — a header of `Key: value` lines (video ID, title, channel, language with code, auto-generated yes/no, canonical `https://youtu.be/<id>` URL; title/channel lines omitted if the service omitted them), then a blank line, then the transcript (`textTimestamped` when timestamps are on, otherwise `text`).
+
+**Error results:** both are returned as a tool result with `isError: true`, never a protocol-level error.
+
+- **Service error** (non-2xx from the transcript service): text includes the HTTP status and the service's own error message, e.g. `transcript service returned 404: no captions available for this video`.
+- **Unreachable service** (connection refused, DNS failure, timeout): text names the configured `TRANSCRIPT_API_URL` and suggests the Mac may be off the LAN/VPN.
+
+A missing or unparseable `TRANSCRIPT_API_URL` fails fast at startup with an error naming the variable.
+
 ## Updating from GitHub
 
 After you have a **git clone** on the machine (laptop or LXC), you can refresh from `origin` and rebuild in one step.
