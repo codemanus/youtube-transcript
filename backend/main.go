@@ -32,6 +32,9 @@ import (
 //go:embed all:static
 var staticFS embed.FS
 
+//go:embed placeholder.html
+var placeholderHTML []byte
+
 const (
 	maxBodyBytes       = 16 * 1024
 	defaultListen      = ":8080"
@@ -89,8 +92,7 @@ func runHTTPServer() {
 	if err != nil {
 		log.Fatalf("static embed: %v", err)
 	}
-	fileServer := http.FileServer(http.FS(static))
-	mux.Handle("/", fileServer)
+	mux.Handle("/", staticHandler(static))
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -420,6 +422,24 @@ func mapYouTubeError(err error) (int, string) {
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(transcriptapi.ErrorResponse{Error: msg})
+}
+
+// staticHandler serves the synced UI build. When the build is missing (a bare
+// go build with only backend/static/.gitkeep), "/" gets a placeholder page.
+func staticHandler(ui fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(ui))
+	if _, err := fs.Stat(ui, "index.html"); err == nil {
+		return fileServer
+	}
+	apilog.Info("no UI build embedded; serving placeholder page (run make build)")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(placeholderHTML)
+	})
 }
 
 func logRequest(next http.Handler) http.Handler {
