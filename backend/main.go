@@ -273,7 +273,7 @@ func handleChurchGuide(w http.ResponseWriter, r *http.Request) {
 	client, err := newGroupsPortalClient()
 	if err != nil {
 		apilog.Error("church guide config error: %v", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, groupsPortalClientErrorMessage(err))
 		return
 	}
 
@@ -308,7 +308,7 @@ func handleChurchGuidePDF(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		apilog.Error("church guide config error: %v", err)
 		w.Header().Set("Content-Type", "application/json")
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, groupsPortalClientErrorMessage(err))
 		return
 	}
 
@@ -329,15 +329,31 @@ func handleChurchGuidePDF(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// errCookieNotConfigured is safe to return to an unauthenticated caller
+// verbatim. Any other error from newGroupsPortalClient (e.g. an I/O failure
+// reading the cookie file) may contain filesystem details and must not be.
+var errCookieNotConfigured = errors.New("no groups portal session cookie is configured; set one via POST /api/church-guide/admin/cookie or scripts/update-groups-portal-cookie.sh")
+
 func newGroupsPortalClient() (*groupsportal.Client, error) {
 	cookie, _, configured, err := portalcookie.Read()
 	if err != nil {
 		return nil, fmt.Errorf("read groups portal cookie: %w", err)
 	}
 	if !configured {
-		return nil, errors.New("no groups portal session cookie is configured; set one via POST /api/church-guide/admin/cookie or scripts/update-groups-portal-cookie.sh")
+		return nil, errCookieNotConfigured
 	}
 	return groupsportal.NewClient(groupsportal.DefaultBaseURL, cookie, &http.Client{Timeout: requestTimeout}), nil
+}
+
+// groupsPortalClientErrorMessage returns the text safe to send to an
+// unauthenticated caller for a newGroupsPortalClient failure: the specific
+// "not configured" message, or a generic one that doesn't echo err's
+// (possibly filesystem-path-bearing) detail.
+func groupsPortalClientErrorMessage(err error) string {
+	if errors.Is(err, errCookieNotConfigured) {
+		return err.Error()
+	}
+	return "internal error reading cookie configuration"
 }
 
 func mapGroupsPortalError(err error) (int, string) {
@@ -380,6 +396,18 @@ func churchGuideAdminSaveCookieHandler(portalBaseURL string, httpClient *http.Cl
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
+		// Basic Auth credentials, once entered, are resent by the browser to
+		// this origin regardless of which page triggered the request — unlike
+		// SameSite cookies, that's not scoped to same-site requests. A cross-site
+		// <form> can only produce a handful of Content-Types (never
+		// application/json without a CORS preflight this server doesn't allow),
+		// so requiring it here is a cheap, standard defense against a
+		// cross-site page silently triggering a cookie overwrite.
+		if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+			return
+		}
+
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
@@ -411,14 +439,16 @@ func churchGuideAdminSaveCookieHandler(portalBaseURL string, httpClient *http.Cl
 			return
 		}
 
-		if err := portalcookie.Write(candidate); err != nil {
+		updatedAt, err := portalcookie.Write(candidate)
+		if err != nil {
 			apilog.Error("church guide admin cookie save: write failed: %v", err)
 			writeError(w, http.StatusInternalServerError, "cookie validated but could not be saved")
 			return
 		}
 
 		apilog.Info("church guide admin cookie updated")
-		handleChurchGuideAdminStatus(w, r)
+		s := updatedAt.UTC().Format(time.RFC3339)
+		_ = json.NewEncoder(w).Encode(churchGuideAdminStatusResponse{Configured: true, UpdatedAt: &s})
 	}
 }
 

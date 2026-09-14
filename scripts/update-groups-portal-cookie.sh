@@ -40,7 +40,15 @@ trap 'rm -f "$TMP"' EXIT
 printf '%s' "$COOKIE_VALUE" > "$TMP"
 
 sudo install -d -m 700 "$(dirname "$COOKIE_FILE")"
-sudo install -m 600 "$TMP" "$COOKIE_FILE"
+
+# install/cp write the destination in place; a concurrent read (the running
+# service reads this file on every Church Guide request) could observe a
+# partially-written value mid-copy. Stage in the same directory instead, then
+# mv — a rename within one directory is atomic, so a concurrent read always
+# sees either the old value or the new one in full, never a partial write.
+STAGED="${COOKIE_FILE}.new"
+sudo install -m 600 "$TMP" "$STAGED"
+sudo mv -f "$STAGED" "$COOKIE_FILE"
 
 echo "==> wrote cookie to ${COOKIE_FILE}"
 

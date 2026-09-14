@@ -95,6 +95,33 @@ func TestBasicAuthMiddleware(t *testing.T) {
 	})
 }
 
+func TestChurchGuideAdminSaveCookieRejectsNonJSONContentType(t *testing.T) {
+	t.Setenv(portalcookie.PathEnvVar, filepath.Join(t.TempDir(), "cookie"))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("portal should not be contacted when Content-Type isn't application/json")
+	}))
+	defer srv.Close()
+
+	h := churchGuideAdminSaveCookieHandler(srv.URL, srv.Client())
+
+	// A cross-site <form> POST can only produce these Content-Types (never
+	// application/json), so rejecting them is the CSRF defense — this test
+	// pins that a same-site JSON client isn't accidentally caught by it too.
+	for _, ct := range []string{"", "application/x-www-form-urlencoded", "text/plain"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/church-guide/admin/cookie", strings.NewReader(`{"cookie":"connect.sid=x"}`))
+		if ct != "" {
+			req.Header.Set("Content-Type", ct)
+		}
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("Content-Type %q: status = %d, want %d", ct, rec.Code, http.StatusUnsupportedMediaType)
+		}
+	}
+}
+
 func TestChurchGuideAdminSaveCookieRejectsEmptyWithoutValidating(t *testing.T) {
 	t.Setenv(portalcookie.PathEnvVar, filepath.Join(t.TempDir(), "cookie"))
 
@@ -108,6 +135,7 @@ func TestChurchGuideAdminSaveCookieRejectsEmptyWithoutValidating(t *testing.T) {
 	for _, body := range []string{`{"cookie":""}`, `{"cookie":"   "}`} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/church-guide/admin/cookie", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
 		h.ServeHTTP(rec, req)
 
 		if rec.Code != http.StatusBadRequest {
@@ -127,6 +155,7 @@ func TestChurchGuideAdminSaveCookieRejectedByPortal(t *testing.T) {
 	h := churchGuideAdminSaveCookieHandler(srv.URL, srv.Client())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/church-guide/admin/cookie", strings.NewReader(`{"cookie":"connect.sid=bad"}`))
+	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -158,6 +187,7 @@ func TestChurchGuideAdminSaveCookieUnreachablePortal(t *testing.T) {
 	h := churchGuideAdminSaveCookieHandler(base, http.DefaultClient)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/church-guide/admin/cookie", strings.NewReader(`{"cookie":"connect.sid=x"}`))
+	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
@@ -191,6 +221,7 @@ func TestChurchGuideAdminSaveCookieValidCandidate(t *testing.T) {
 	h := churchGuideAdminSaveCookieHandler(srv.URL, srv.Client())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/church-guide/admin/cookie", strings.NewReader(`{"cookie":"connect.sid=good"}`))
+	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {

@@ -107,13 +107,15 @@ The cookie is stored in a plain file (default `/var/lib/youtube-transcript/group
 - Reload the page, or click around; click any request to `mycgconnect.com/api/...`.
 - Under **Headers → Request Headers**, copy the full value of the `cookie` header — it starts with `connect.sid=`.
 
-**2. Apply it.** On a host running the service, with a git clone:
+**2. Apply it — the admin page (primary path).** Open **`/church-guide/admin`** (linked in the nav as **Admin**) in a browser on the LAN/VPN. The browser prompts for HTTP Basic Auth — username `admin`, password `CHURCH_GUIDE_ADMIN_PASSWORD` (set on the server; ask whoever deployed it if you don't have it). The page shows whether a cookie is currently configured and how long ago it was last updated, and has a field to paste the new value into. On submit, the server validates the candidate against the real Groups Portal *before* saving it — a bad paste is rejected immediately ("the portal rejected this cookie") instead of surfacing later during an unattended run; an unreachable portal gets a separate "couldn't validate, try again" message. The cookie value itself is never shown back by the page, even after a successful save. Saving takes effect on the very next Church Guide fetch — no restart needed.
+
+**2b. Apply it — the script (fallback, e.g. if the web UI itself is down).** On a host running the service, with a git clone:
 
 ```bash
 ./scripts/update-groups-portal-cookie.sh
 ```
 
-It prompts for the cookie value (input isn't echoed, and it's never passed as a command argument, so it doesn't land in shell history) and writes it directly to the cookie file (default `/var/lib/youtube-transcript/groups-portal-cookie`, override with `COOKIE_FILE`). The running service picks up the new value on its very next request — no restart needed. (This is the only way to update the cookie until the admin page lands; `SYSTEMD_UNIT=youtube-transcript` still works if you want the optional restart, but it's no longer required.)
+It prompts for the cookie value (input isn't echoed, and it's never passed as a command argument, so it doesn't land in shell history) and writes it directly to the cookie file (default `/var/lib/youtube-transcript/groups-portal-cookie`, override with `COOKIE_FILE`). Unlike the admin page, it does **not** validate the value against the portal before writing — a bad paste is only caught on the next fetch. The running service picks up the new value on its very next request either way — no restart needed (`SYSTEMD_UNIT=youtube-transcript` still works if you want the optional restart).
 
 ## Updating from GitHub
 
@@ -247,10 +249,10 @@ curl -u admin:$CHURCH_GUIDE_ADMIN_PASSWORD http://localhost:8080/api/church-guid
 
 `POST /api/church-guide/admin/cookie`
 
-Same auth. Body `{"cookie": "connect.sid=..."}`. Rejects an empty/whitespace-only value immediately (`400`, no portal call). Otherwise validates the value against the real Groups Portal before saving: `422` if the portal rejects it, `503` if the portal couldn't be reached to check. On success (`200`), saves it via `portalcookie.Write` and returns the same shape as `/admin/status` — still never the value.
+Same auth. Requires `Content-Type: application/json` (rejected with `415` otherwise — a deliberate CSRF defense, since cached Basic Auth credentials are resent to this origin regardless of which page triggered the request, and a cross-site form can't produce that content type). Body `{"cookie": "connect.sid=..."}`. Rejects an empty/whitespace-only value immediately (`400`, no portal call). Otherwise validates the value against the real Groups Portal before saving: `422` if the portal rejects it, `503` if the portal couldn't be reached to check. On success (`200`), saves it via `portalcookie.Write` and returns the same shape as `/admin/status` — still never the value.
 
 ```bash
-curl -u admin:$CHURCH_GUIDE_ADMIN_PASSWORD -X POST -d '{"cookie":"connect.sid=..."}' http://localhost:8080/api/church-guide/admin/cookie
+curl -u admin:$CHURCH_GUIDE_ADMIN_PASSWORD -X POST -H 'Content-Type: application/json' -d '{"cookie":"connect.sid=..."}' http://localhost:8080/api/church-guide/admin/cookie
 ```
 
 ## Troubleshooting (transcript failures)
@@ -279,7 +281,7 @@ After=network.target
 [Service]
 Type=simple
 Environment=LISTEN_ADDR=:8080
-Environment=CHURCH_GUIDE_ADMIN_PASSWORD=changeme
+EnvironmentFile=-/etc/youtube-transcript.env
 ExecStart=/usr/local/bin/youtube-transcript
 Restart=on-failure
 RestartSec=5
@@ -291,7 +293,14 @@ WantedBy=multi-user.target
 
 The [Groups Portal session cookie](#church-guide-groups-portal) doesn't go through this unit at all — it's a file, updated independently by `scripts/update-groups-portal-cookie.sh`, and the running service picks it up without a restart.
 
-**`CHURCH_GUIDE_ADMIN_PASSWORD`** is inline here deliberately (unlike the cookie, it's not URL-encoded and Cody picks its value), but systemd still expands `%`-sequences in a unit file's own `Environment=` line — avoid a literal `%` in the password, or move it to an `EnvironmentFile=` instead.
+**`CHURCH_GUIDE_ADMIN_PASSWORD` goes in `EnvironmentFile=`, not an inline `Environment=` line.** Unit files under `/etc/systemd/system/` are normally world-readable (mode `644`), so an inline `Environment=CHURCH_GUIDE_ADMIN_PASSWORD=...` would let any local user read the admin password straight out of the unit file (or via `systemctl show`). Create the env file root-owned and unreadable by others, then add the password to it:
+
+```bash
+sudo install -m 600 /dev/null /etc/youtube-transcript.env
+echo 'CHURCH_GUIDE_ADMIN_PASSWORD=changeme' | sudo tee -a /etc/youtube-transcript.env >/dev/null
+```
+
+(The leading `-` on `EnvironmentFile=-...` makes it optional, so the unit still starts if the file doesn't exist yet. This also sidesteps systemd's `%`-expansion of unit-file `Environment=` lines, which would otherwise corrupt a password containing a literal `%`.)
 
 Install and enable:
 

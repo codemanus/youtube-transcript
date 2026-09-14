@@ -28,7 +28,7 @@ func TestReadNotConfiguredWhenFileAbsent(t *testing.T) {
 func TestWriteThenReadRoundTrip(t *testing.T) {
 	t.Setenv(PathEnvVar, filepath.Join(t.TempDir(), "groups-portal-cookie"))
 
-	if err := Write("connect.sid=abc123"); err != nil {
+	if _, err := Write("connect.sid=abc123"); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
@@ -48,13 +48,17 @@ func TestReadReportsFileModTime(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "groups-portal-cookie")
 	t.Setenv(PathEnvVar, path)
 
-	if err := Write("connect.sid=abc123"); err != nil {
+	writtenAt, err := Write("connect.sid=abc123")
+	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
+	}
+	if !writtenAt.Equal(info.ModTime()) {
+		t.Errorf("Write's returned time = %v, want %v (file mtime)", writtenAt, info.ModTime())
 	}
 
 	_, updatedAt, _, err := Read()
@@ -69,11 +73,11 @@ func TestReadReportsFileModTime(t *testing.T) {
 func TestWriteOverwritesPreviousValue(t *testing.T) {
 	t.Setenv(PathEnvVar, filepath.Join(t.TempDir(), "groups-portal-cookie"))
 
-	if err := Write("connect.sid=old"); err != nil {
+	if _, err := Write("connect.sid=old"); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	time.Sleep(2 * time.Millisecond) // ensure a distinguishable mtime, in case the filesystem's clock is coarse
-	if err := Write("connect.sid=new"); err != nil {
+	if _, err := Write("connect.sid=new"); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 

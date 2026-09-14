@@ -73,7 +73,12 @@ func Read() (value string, updatedAt time.Time, configured bool, err error) {
 // same directory and renames it into place, so a concurrent Read (from a
 // live request) never observes a partially-written value, and the
 // owner-only permissions apply even if a file or directory already existed.
-func Write(value string) error {
+//
+// It returns the mtime the write ends up with, observed under the same lock
+// that serializes Write calls — so a caller that needs to report "what did I
+// just save" doesn't have to make a separate, unsynchronized Read call that
+// a second, concurrent Write could race.
+func Write(value string) (updatedAt time.Time, err error) {
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -81,31 +86,36 @@ func Write(value string) error {
 	dir := filepath.Dir(p)
 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
+		return time.Time{}, fmt.Errorf("create %s: %w", dir, err)
 	}
 	// MkdirAll only sets the mode on directories it creates; re-assert it in
 	// case dir already existed with broader permissions.
 	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("chmod %s: %w", dir, err)
+		return time.Time{}, fmt.Errorf("chmod %s: %w", dir, err)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".groups-portal-cookie-*")
 	if err != nil {
-		return fmt.Errorf("create temp file in %s: %w", dir, err)
+		return time.Time{}, fmt.Errorf("create temp file in %s: %w", dir, err)
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath) // no-op once the rename below succeeds
 
 	if _, err := tmp.WriteString(value); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write %s: %w", tmpPath, err)
+		return time.Time{}, fmt.Errorf("write %s: %w", tmpPath, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("write %s: %w", tmpPath, err)
+		return time.Time{}, fmt.Errorf("write %s: %w", tmpPath, err)
 	}
 
 	if err := os.Rename(tmpPath, p); err != nil {
-		return fmt.Errorf("rename %s to %s: %w", tmpPath, p, err)
+		return time.Time{}, fmt.Errorf("rename %s to %s: %w", tmpPath, p, err)
 	}
-	return nil
+
+	info, err := os.Stat(p)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("stat %s: %w", p, err)
+	}
+	return info.ModTime(), nil
 }
