@@ -8,6 +8,7 @@ dist/
 # Local issue tracker (see docs/agents/issue-tracker.md)
 .scratch/
 
-# Generated UI assets (see `backend/static/index.html` for bare go build)
+# Generated UI assets (synced by `make build`). `.gitkeep` keeps `go:embed all:static`
+# compiling on a bare go build; the server then serves `backend/placeholder.html`.
 backend/static/*
-!backend/static/index.html
+!backend/static/.gitkeep
