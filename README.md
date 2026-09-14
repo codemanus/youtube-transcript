@@ -81,6 +81,40 @@ Add an entry to `claude_desktop_config.json` (in Claude Desktop, **Settings → 
 
 A missing or unparseable `TRANSCRIPT_API_URL` fails fast at startup with an error naming the variable.
 
+### Tool contract: `get_church_guide`
+
+Fetches the current week's Church Guide (Two Cities Church Community Group discussion guide) from the Groups Portal (`mycgconnect.com`). See [Church Guide (Groups Portal)](#church-guide-groups-portal) below for how the session cookie it depends on is set up and refreshed.
+
+**Input:** none — it always means "this week."
+
+**Success result:** a single text content block — `Title:` and `Week of:` header lines, then a blank line, then the guide's text.
+
+**Error results:** `isError: true`, same pattern as `get_youtube_transcript` — a service error (e.g. an expired session) includes the HTTP status and message; an unreachable local service names the configured address and suggests checking the LAN/VPN.
+
+## Church Guide (Groups Portal)
+
+Fetches the current week's Community Group discussion guide from the Groups Portal (`mycgconnect.com`) so it doesn't have to be copied by hand into the weekly notes pipeline. Text comes from the portal's own structured content; the original PDF stays available as a backup. See [`CONTEXT.md`](CONTEXT.md) for the "Church Guide" / "Groups Portal" terms and [ADR-0001](docs/adr/0001-manual-session-cookie-refresh-for-church-guide.md) for why authentication is a manually-refreshed cookie rather than automated login.
+
+### Session cookie
+
+The Groups Portal issues a session cookie (`connect.sid`) good for about 30 days after a one-time email login — there's no username/password this app stores or automates. When it expires, `/api/church-guide` and the `get_church_guide` MCP tool start failing with a clear "session expired or invalid" error until it's refreshed.
+
+**1. Get the current cookie value**, from a browser already logged into the portal:
+
+- Open `mycgconnect.com`, open DevTools → **Network** tab.
+- Reload the page, or click around; click any request to `mycgconnect.com/api/...`.
+- Under **Headers → Request Headers**, copy the full value of the `cookie` header — it starts with `connect.sid=`.
+
+**2. Apply it.** On a host running the service, with a git clone:
+
+```bash
+SYSTEMD_UNIT=youtube-transcript ./scripts/update-groups-portal-cookie.sh
+```
+
+It prompts for the cookie value (input isn't echoed, and it's never passed as a command argument, so it doesn't land in shell history), writes `GROUPS_PORTAL_SESSION_COOKIE` to an env file (default `/etc/youtube-transcript.env`, override with `ENV_FILE`), and restarts the given systemd unit. **Deliberately writes to an `EnvironmentFile=`, not the unit's own `Environment=`**: the cookie is URL-encoded (contains `%3A`, `%2B`, etc.), and systemd expands `%`-sequences as specifiers in a unit file's own directives — an inline `Environment=` line silently corrupts the value, while an `EnvironmentFile=`'s contents are read as plain text.
+
+**One-time setup** on a host that doesn't have this yet: add `EnvironmentFile=/etc/youtube-transcript.env` (or your `ENV_FILE` path) under `[Service]` in the systemd unit (see [systemd](#systemd-debian-lxc) below), then `sudo systemctl daemon-reload`.
+
 ## Updating from GitHub
 
 After you have a **git clone** on the machine (laptop or LXC), you can refresh from `origin` and rebuild in one step.
@@ -124,6 +158,7 @@ Optional: `INSTALL_BIN=/usr/local/bin/youtube-transcript` (default), `GIT_BRANCH
 | Environment variable | Meaning | Default |
 |----------------------|---------|---------|
 | `LISTEN_ADDR` | `host:port` for HTTP | `:8080` |
+| `GROUPS_PORTAL_SESSION_COOKIE` | Groups Portal session cookie, needed only for `/api/church-guide*` and `get_church_guide` | none — those requests fail with a clear error until set (see [Church Guide](#church-guide-groups-portal)) |
 
 Bind to a LAN address if you do not want the app on every interface, for example:
 
@@ -189,6 +224,18 @@ Timestamps use the **start** of each cue in seconds (floored). Duration is not r
 
 **Debug (trusted networks):** `GET /api/logs?limit=120` returns recent server log lines (same entries as `journald`’s `[api]` lines, capped in memory). `POST /api/logs/clear` empties that buffer. The web UI can show this under **Show server log**.
 
+`GET /api/church-guide`
+
+No parameters — always means "this week." Requires `GROUPS_PORTAL_SESSION_COOKIE` (see [Church Guide](#church-guide-groups-portal)).
+
+**Success `200`** JSON fields: `title`, `weekStartDate` (ISO 8601, from the portal), `text` (may be empty if the portal hasn't published this week's content yet, even though title/week are known).
+
+**Errors:** `401` if the session cookie is expired/invalid (refresh it), `404` if the current week has no PDF on file, `500` if `GROUPS_PORTAL_SESSION_COOKIE` isn't configured, `503` for other portal/network failures.
+
+`GET /api/church-guide/pdf`
+
+Same auth and current-week semantics as above; streams the raw PDF (`Content-Type: application/pdf`) instead of JSON. Used by the web UI's **Download PDF** button. Fetches fresh from the portal on every call — nothing is cached or persisted server-side by either endpoint.
+
 ## Troubleshooting (transcript failures)
 
 - **Log shows** `Get "https://www.youtube.com/watch?...": EOF` **or** similar before any HTTP status: YouTube closed the TCP/TLS connection early (common with minimal or HTTP/2 clients). This repo vendors [`youtube-transcript-go`](backend/third_party/youtube-transcript-go) with a **browser-like User-Agent**, **extra headers**, and **HTTP/1.1-only** transport; rebuild/restart the Go server after updates.
@@ -215,6 +262,7 @@ After=network.target
 [Service]
 Type=simple
 Environment=LISTEN_ADDR=:8080
+EnvironmentFile=-/etc/youtube-transcript.env
 ExecStart=/usr/local/bin/youtube-transcript
 Restart=on-failure
 RestartSec=5
@@ -223,6 +271,8 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 ```
+
+`EnvironmentFile=-/etc/youtube-transcript.env` (the leading `-` makes it optional, so the unit still starts if the file doesn't exist yet) is where [`GROUPS_PORTAL_SESSION_COOKIE`](#church-guide-groups-portal) lives — put secrets there, not in an inline `Environment=` line, since systemd expands `%`-sequences in the unit file itself and a URL-encoded cookie contains them.
 
 Install and enable:
 
