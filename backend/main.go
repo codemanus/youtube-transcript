@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/codychambers/youtube-transcript/backend/internal/apilog"
+	"github.com/codychambers/youtube-transcript/backend/internal/churchguideapi"
+	"github.com/codychambers/youtube-transcript/backend/internal/groupsportal"
 	"github.com/codychambers/youtube-transcript/backend/internal/transcriptapi"
 	"github.com/codychambers/youtube-transcript/backend/internal/transcriptmcp"
 	"github.com/codychambers/youtube-transcript/backend/internal/videoid"
@@ -80,6 +82,8 @@ func runHTTPServer() {
 	mux.HandleFunc("GET /api/logs", handleLogs)
 	mux.HandleFunc("POST /api/logs/clear", handleLogsClear)
 	mux.HandleFunc("POST /api/transcript", handleTranscript)
+	mux.HandleFunc("GET /api/church-guide", handleChurchGuide)
+	mux.HandleFunc("GET /api/church-guide/pdf", handleChurchGuidePDF)
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {
@@ -227,6 +231,93 @@ func handleTranscript(w http.ResponseWriter, r *http.Request) {
 
 	apilog.Info("transcript ok video=%s lines=%d lang=%s generated=%v title=%q", videoID, len(ft.Snippets), ft.LanguageCode, ft.IsGenerated, videoTitle)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func handleChurchGuide(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if !checkRateLimit(r.RemoteAddr) {
+		apilog.Warn("rate limited %s", r.RemoteAddr)
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded; try again shortly")
+		return
+	}
+
+	client, err := newGroupsPortalClient()
+	if err != nil {
+		apilog.Error("church guide config error: %v", err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	defer cancel()
+
+	guide, err := client.FetchGuide(ctx)
+	if err != nil {
+		status, msg := mapGroupsPortalError(err)
+		apilog.Error("church guide fetch failed: %v", err)
+		writeError(w, status, msg)
+		return
+	}
+
+	apilog.Info("church guide ok title=%q week=%s", guide.Title, guide.WeekStartDate)
+	_ = json.NewEncoder(w).Encode(churchguideapi.Response{
+		Title:         guide.Title,
+		WeekStartDate: guide.WeekStartDate,
+		Text:          guide.Text,
+	})
+}
+
+func handleChurchGuidePDF(w http.ResponseWriter, r *http.Request) {
+	if !checkRateLimit(r.RemoteAddr) {
+		apilog.Warn("rate limited %s", r.RemoteAddr)
+		w.Header().Set("Content-Type", "application/json")
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded; try again shortly")
+		return
+	}
+
+	client, err := newGroupsPortalClient()
+	if err != nil {
+		apilog.Error("church guide config error: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	defer cancel()
+
+	data, err := client.FetchPDF(ctx)
+	if err != nil {
+		status, msg := mapGroupsPortalError(err)
+		apilog.Error("church guide pdf fetch failed: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		writeError(w, status, msg)
+		return
+	}
+
+	apilog.Info("church guide pdf ok bytes=%d", len(data))
+	w.Header().Set("Content-Type", "application/pdf")
+	_, _ = w.Write(data)
+}
+
+func newGroupsPortalClient() (*groupsportal.Client, error) {
+	cookie, err := groupsportal.SessionCookieFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return groupsportal.NewClient(groupsportal.DefaultBaseURL, cookie, &http.Client{Timeout: requestTimeout}), nil
+}
+
+func mapGroupsPortalError(err error) (int, string) {
+	switch {
+	case errors.Is(err, groupsportal.ErrSessionExpired):
+		return http.StatusUnauthorized, fmt.Sprintf("groups portal session expired or invalid; refresh %s", groupsportal.SessionCookieEnvVar)
+	case errors.Is(err, groupsportal.ErrNoPDF):
+		return http.StatusNotFound, err.Error()
+	default:
+		return http.StatusServiceUnavailable, fmt.Sprintf("could not fetch the church guide: %v", err)
+	}
 }
 
 func languageCodes(lang string) []string {

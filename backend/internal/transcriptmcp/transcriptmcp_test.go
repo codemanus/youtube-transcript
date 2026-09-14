@@ -11,6 +11,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/codychambers/youtube-transcript/backend/internal/churchguideapi"
 	"github.com/codychambers/youtube-transcript/backend/internal/transcriptapi"
 )
 
@@ -90,25 +91,27 @@ func TestListTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(res.Tools) != 1 {
-		t.Fatalf("want 1 tool, got %d", len(res.Tools))
+	if len(res.Tools) != 2 {
+		t.Fatalf("want 2 tools, got %d", len(res.Tools))
 	}
 
-	tool := res.Tools[0]
-	if tool.Name != toolName {
-		t.Errorf("tool name = %q, want %q", tool.Name, toolName)
+	byName := make(map[string]*mcp.Tool)
+	for _, tool := range res.Tools {
+		byName[tool.Name] = tool
 	}
 
-	schema, ok := tool.InputSchema.(map[string]any)
+	transcriptTool, ok := byName[toolName]
 	if !ok {
-		t.Fatalf("InputSchema is %T, want map[string]any", tool.InputSchema)
+		t.Fatalf("tools missing %q", toolName)
 	}
-
+	schema, ok := transcriptTool.InputSchema.(map[string]any)
+	if !ok {
+		t.Fatalf("InputSchema is %T, want map[string]any", transcriptTool.InputSchema)
+	}
 	required, _ := schema["required"].([]any)
 	if len(required) != 1 || required[0] != "url" {
 		t.Errorf("required = %v, want [\"url\"]", required)
 	}
-
 	props, ok := schema["properties"].(map[string]any)
 	if !ok {
 		t.Fatalf("properties is %T, want map[string]any", schema["properties"])
@@ -117,6 +120,18 @@ func TestListTools(t *testing.T) {
 		if _, ok := props[name]; !ok {
 			t.Errorf("properties missing %q", name)
 		}
+	}
+
+	guideTool, ok := byName[churchGuideToolName]
+	if !ok {
+		t.Fatalf("tools missing %q", churchGuideToolName)
+	}
+	guideSchema, ok := guideTool.InputSchema.(map[string]any)
+	if !ok {
+		t.Fatalf("InputSchema is %T, want map[string]any", guideTool.InputSchema)
+	}
+	if required, _ := guideSchema["required"].([]any); len(required) != 0 {
+		t.Errorf("%s required = %v, want none", churchGuideToolName, required)
 	}
 }
 
@@ -399,6 +414,105 @@ func TestCallToolUnreachable(t *testing.T) {
 	res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
 		Name:      toolName,
 		Arguments: map[string]any{"url": "https://youtu.be/abc12345678"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("want isError, got success: %s", textContent(t, res))
+	}
+
+	got := textContent(t, res)
+	if !strings.Contains(got, baseURL) {
+		t.Errorf("error text %q does not name the configured address %q", got, baseURL)
+	}
+	if !strings.Contains(got, "LAN/VPN") {
+		t.Errorf("error text %q does not hint that the Mac may be off the LAN/VPN", got)
+	}
+}
+
+func TestCallChurchGuideTool(t *testing.T) {
+	cs := newTestSession(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/church-guide" {
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(churchguideapi.Response{
+			Title:         "Until Now",
+			WeekStartDate: "2026-09-13T00:00:00.000Z",
+			Text:          "line one\nline two",
+		})
+	}))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      churchGuideToolName,
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("CallTool returned isError: %s", textContent(t, res))
+	}
+
+	want := "Title: Until Now\n" +
+		"Week of: 2026-09-13T00:00:00.000Z\n" +
+		"\n" +
+		"line one\nline two"
+	if got := textContent(t, res); got != want {
+		t.Errorf("result text =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestCallChurchGuideToolServiceError(t *testing.T) {
+	cs := newTestSession(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"groups portal session expired or invalid"}`))
+	}))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      churchGuideToolName,
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("want isError, got success: %s", textContent(t, res))
+	}
+	want := "church guide service returned 401: groups portal session expired or invalid"
+	if got := textContent(t, res); got != want {
+		t.Errorf("error text = %q, want %q", got, want)
+	}
+}
+
+func TestCallChurchGuideToolUnreachable(t *testing.T) {
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	baseURL := httpSrv.URL
+	httpSrv.Close()
+
+	server := NewServer(baseURL, http.DefaultClient)
+
+	ctx := context.Background()
+	t1, t2 := mcp.NewInMemoryTransports()
+
+	serverSession, err := server.Connect(ctx, t1, nil)
+	if err != nil {
+		t.Fatalf("server.Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = serverSession.Wait() })
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatalf("client.Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = clientSession.Close() })
+
+	res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+		Name:      churchGuideToolName,
+		Arguments: map[string]any{},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)

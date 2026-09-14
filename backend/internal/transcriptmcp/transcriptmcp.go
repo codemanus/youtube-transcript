@@ -17,26 +17,34 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/codychambers/youtube-transcript/backend/internal/churchguideapi"
 	"github.com/codychambers/youtube-transcript/backend/internal/transcriptapi"
 )
 
 const toolName = "get_youtube_transcript"
+const churchGuideToolName = "get_church_guide"
 
-// NewServer builds an MCP server exposing get_youtube_transcript, which
-// fetches transcripts from the transcript service at baseURL using client.
+// NewServer builds an MCP server exposing get_youtube_transcript and
+// get_church_guide, both served from the local youtube-transcript HTTP
+// service at baseURL using client.
 func NewServer(baseURL string, client *http.Client) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "youtube-transcript", Version: "0.1.0"}, nil)
 
-	svc := &transcriptTool{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  client,
-	}
+	trimmedBaseURL := strings.TrimRight(baseURL, "/")
 
+	svc := &transcriptTool{baseURL: trimmedBaseURL, client: client}
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        toolName,
 		Description: "Fetch a YouTube video's transcript via the local transcript service. Accepts a watch/short/embed URL or a bare video ID.",
 		InputSchema: inputSchema,
 	}, svc.call)
+
+	guideSvc := &churchGuideTool{baseURL: trimmedBaseURL, client: client}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        churchGuideToolName,
+		Description: "Fetch the current week's Church Guide (Two Cities Church Community Group discussion guide) via the local service. Takes no input; always means \"this week.\"",
+		InputSchema: &jsonschema.Schema{Type: "object"},
+	}, guideSvc.call)
 
 	return server
 }
@@ -94,7 +102,7 @@ func (t *transcriptTool) call(ctx context.Context, _ *mcp.CallToolRequest, in tr
 
 	resp, err := t.client.Do(httpReq)
 	if err != nil {
-		return errorResult(fmt.Sprintf("could not reach the transcript service at %s: %v (is the Mac on the LAN/VPN?)", t.baseURL, err)), nil, nil
+		return errorResult(unreachableMessage("transcript service", t.baseURL, err)), nil, nil
 	}
 	defer resp.Body.Close()
 
@@ -104,7 +112,7 @@ func (t *transcriptTool) call(ctx context.Context, _ *mcp.CallToolRequest, in tr
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return errorResult(serviceErrorMessage(resp.StatusCode, respBody)), nil, nil
+		return errorResult(serviceErrorMessage("transcript service", resp.StatusCode, respBody)), nil, nil
 	}
 
 	var out transcriptapi.Response
@@ -120,7 +128,7 @@ func (t *transcriptTool) call(ctx context.Context, _ *mcp.CallToolRequest, in tr
 // serviceErrorMessage builds the isError text for a non-2xx response,
 // including the status and, when present, the service's own {error} message
 // (or its raw body, if that doesn't parse as the expected shape).
-func serviceErrorMessage(status int, body []byte) string {
+func serviceErrorMessage(label string, status int, body []byte) string {
 	var errResp transcriptapi.ErrorResponse
 	msg := ""
 	if json.Unmarshal(body, &errResp) == nil {
@@ -130,9 +138,15 @@ func serviceErrorMessage(status int, body []byte) string {
 		msg = strings.TrimSpace(string(body))
 	}
 	if msg == "" {
-		return fmt.Sprintf("transcript service returned %d", status)
+		return fmt.Sprintf("%s returned %d", label, status)
 	}
-	return fmt.Sprintf("transcript service returned %d: %s", status, msg)
+	return fmt.Sprintf("%s returned %d: %s", label, status, msg)
+}
+
+// unreachableMessage builds the isError text for a transport-level failure
+// reaching the local service.
+func unreachableMessage(label, baseURL string, err error) string {
+	return fmt.Sprintf("could not reach the %s at %s: %v (is the Mac on the LAN/VPN?)", label, baseURL, err)
 }
 
 func errorResult(msg string) *mcp.CallToolResult {
@@ -170,4 +184,49 @@ func yesNo(b bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+type churchGuideTool struct {
+	baseURL string
+	client  *http.Client
+}
+
+func (t *churchGuideTool) call(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, t.baseURL+"/api/church-guide", nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build church guide request: %w", err)
+	}
+
+	resp, err := t.client.Do(httpReq)
+	if err != nil {
+		return errorResult(unreachableMessage("church guide service", t.baseURL, err)), nil, nil
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errorResult(fmt.Sprintf("could not read the church guide service's response: %v", err)), nil, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return errorResult(serviceErrorMessage("church guide service", resp.StatusCode, respBody)), nil, nil
+	}
+
+	var out churchguideapi.Response
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return errorResult(fmt.Sprintf("church guide service returned an unreadable response: %v", err)), nil, nil
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: formatGuideResult(&out)}},
+	}, nil, nil
+}
+
+func formatGuideResult(r *churchguideapi.Response) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Title: %s\n", r.Title)
+	fmt.Fprintf(&b, "Week of: %s\n", r.WeekStartDate)
+	b.WriteByte('\n')
+	b.WriteString(r.Text)
+	return b.String()
 }
