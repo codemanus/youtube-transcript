@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -45,10 +46,32 @@ const (
 	// mcpClientTimeout is comfortably above the service's own requestTimeout so
 	// the service's own 504 response surfaces instead of a client-side timeout.
 	mcpClientTimeout = 90 * time.Second
+
+	// churchGuideAdminUsername is fixed; only the password varies (see
+	// churchGuideAdminPasswordEnvVar). A single shared credential, not
+	// per-user accounts (see docs/adr/0002).
+	churchGuideAdminUsername = "admin"
+
+	// churchGuideAdminPasswordEnvVar names the environment variable holding
+	// the password gating the two /api/church-guide/admin/* endpoints.
+	churchGuideAdminPasswordEnvVar = "CHURCH_GUIDE_ADMIN_PASSWORD"
 )
 
 type logsResponse struct {
 	Entries []apilog.Entry `json:"entries"`
+}
+
+// churchGuideAdminStatusResponse is the JSON body for both
+// GET /api/church-guide/admin/status and a successful
+// POST /api/church-guide/admin/cookie — never the cookie value itself.
+type churchGuideAdminStatusResponse struct {
+	Configured bool    `json:"configured"`
+	UpdatedAt  *string `json:"updatedAt,omitempty"` // RFC3339 UTC, present only when Configured
+}
+
+// churchGuideAdminSaveRequest is the JSON body of POST /api/church-guide/admin/cookie.
+type churchGuideAdminSaveRequest struct {
+	Cookie string `json:"cookie"`
 }
 
 func main() {
@@ -88,6 +111,8 @@ func runHTTPServer() {
 	mux.HandleFunc("POST /api/transcript", handleTranscript)
 	mux.HandleFunc("GET /api/church-guide", handleChurchGuide)
 	mux.HandleFunc("GET /api/church-guide/pdf", handleChurchGuidePDF)
+	mux.Handle("GET /api/church-guide/admin/status", basicAuthMiddleware(http.HandlerFunc(handleChurchGuideAdminStatus)))
+	mux.Handle("POST /api/church-guide/admin/cookie", basicAuthMiddleware(churchGuideAdminSaveCookieHandler(groupsportal.DefaultBaseURL, &http.Client{Timeout: requestTimeout})))
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {
@@ -310,7 +335,7 @@ func newGroupsPortalClient() (*groupsportal.Client, error) {
 		return nil, fmt.Errorf("read groups portal cookie: %w", err)
 	}
 	if !configured {
-		return nil, errors.New("no groups portal session cookie is configured; run scripts/update-groups-portal-cookie.sh to set one")
+		return nil, errors.New("no groups portal session cookie is configured; set one via POST /api/church-guide/admin/cookie or scripts/update-groups-portal-cookie.sh")
 	}
 	return groupsportal.NewClient(groupsportal.DefaultBaseURL, cookie, &http.Client{Timeout: requestTimeout}), nil
 }
@@ -318,12 +343,107 @@ func newGroupsPortalClient() (*groupsportal.Client, error) {
 func mapGroupsPortalError(err error) (int, string) {
 	switch {
 	case errors.Is(err, groupsportal.ErrSessionExpired):
-		return http.StatusUnauthorized, "groups portal session expired or invalid; refresh it with scripts/update-groups-portal-cookie.sh"
+		return http.StatusUnauthorized, "groups portal session expired or invalid; refresh it via POST /api/church-guide/admin/cookie or scripts/update-groups-portal-cookie.sh"
 	case errors.Is(err, groupsportal.ErrNoPDF):
 		return http.StatusNotFound, err.Error()
 	default:
 		return http.StatusServiceUnavailable, fmt.Sprintf("could not fetch the church guide: %v", err)
 	}
+}
+
+// handleChurchGuideAdminStatus reports whether a Groups Portal session
+// cookie is configured, and when it was last updated — never the cookie
+// value itself. Behind basicAuthMiddleware.
+func handleChurchGuideAdminStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	_, updatedAt, configured, err := portalcookie.Read()
+	if err != nil {
+		apilog.Error("church guide admin status error: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not read cookie status")
+		return
+	}
+
+	resp := churchGuideAdminStatusResponse{Configured: configured}
+	if configured {
+		s := updatedAt.UTC().Format(time.RFC3339)
+		resp.UpdatedAt = &s
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// churchGuideAdminSaveCookieHandler builds the POST /api/church-guide/admin/cookie
+// handler. portalBaseURL and httpClient are parameters (rather than always
+// groupsportal.DefaultBaseURL) so tests can point validation at a fake
+// portal. Behind basicAuthMiddleware.
+func churchGuideAdminSaveCookieHandler(portalBaseURL string, httpClient *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+
+		var req churchGuideAdminSaveRequest
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+
+		candidate := strings.TrimSpace(req.Cookie)
+		if candidate == "" {
+			writeError(w, http.StatusBadRequest, "cookie value is required")
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+		defer cancel()
+
+		client := groupsportal.NewClient(portalBaseURL, candidate, httpClient)
+		if _, err := client.FetchGuide(ctx); err != nil {
+			if errors.Is(err, groupsportal.ErrSessionExpired) {
+				apilog.Warn("church guide admin cookie save: portal rejected candidate")
+				writeError(w, http.StatusUnprocessableEntity, "the portal rejected this cookie")
+				return
+			}
+			apilog.Error("church guide admin cookie save: validation failed: %v", err)
+			writeError(w, http.StatusServiceUnavailable, "couldn't validate the cookie against the portal; try again")
+			return
+		}
+
+		if err := portalcookie.Write(candidate); err != nil {
+			apilog.Error("church guide admin cookie save: write failed: %v", err)
+			writeError(w, http.StatusInternalServerError, "cookie validated but could not be saved")
+			return
+		}
+
+		apilog.Info("church guide admin cookie updated")
+		handleChurchGuideAdminStatus(w, r)
+	}
+}
+
+// basicAuthMiddleware gates next behind a fixed username and a password read
+// fresh from churchGuideAdminPasswordEnvVar on every request, using
+// constant-time comparison. Missing/wrong credentials (including an unset
+// password, which denies all requests) get 401 with a WWW-Authenticate
+// challenge.
+func basicAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPassword := os.Getenv(churchGuideAdminPasswordEnvVar)
+		user, pass, ok := r.BasicAuth()
+
+		userOK := subtle.ConstantTimeCompare([]byte(user), []byte(churchGuideAdminUsername)) == 1
+		passOK := wantPassword != "" && subtle.ConstantTimeCompare([]byte(pass), []byte(wantPassword)) == 1
+
+		if !ok || !userOK || !passOK {
+			w.Header().Set("WWW-Authenticate", `Basic realm="church guide admin"`)
+			w.Header().Set("Content-Type", "application/json")
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func languageCodes(lang string) []string {

@@ -159,6 +159,7 @@ Optional: `INSTALL_BIN=/usr/local/bin/youtube-transcript` (default), `GIT_BRANCH
 |----------------------|---------|---------|
 | `LISTEN_ADDR` | `host:port` for HTTP | `:8080` |
 | `GROUPS_PORTAL_COOKIE_PATH` | Overrides where the Groups Portal session cookie file lives (see [Church Guide](#church-guide-groups-portal)) | `/var/lib/youtube-transcript/groups-portal-cookie` |
+| `CHURCH_GUIDE_ADMIN_PASSWORD` | Password gating `/api/church-guide/admin/*` (username `admin`), a Basic Auth-protected way to view/update the session cookie | none — those requests fail with `401` until set |
 
 Bind to a LAN address if you do not want the app on every interface, for example:
 
@@ -236,6 +237,22 @@ No parameters — always means "this week." Requires a configured session cookie
 
 Same auth and current-week semantics as above; streams the raw PDF (`Content-Type: application/pdf`) instead of JSON. Used by the web UI's **Download PDF** button. Fetches fresh from the portal on every call — nothing is cached or persisted server-side by either endpoint.
 
+`GET /api/church-guide/admin/status`
+
+Requires HTTP Basic Auth (username `admin`, password `CHURCH_GUIDE_ADMIN_PASSWORD`). Returns `{"configured": bool, "updatedAt": "<RFC3339>"}` — `updatedAt` is omitted when no cookie is configured. Never returns the cookie value itself.
+
+```bash
+curl -u admin:$CHURCH_GUIDE_ADMIN_PASSWORD http://localhost:8080/api/church-guide/admin/status
+```
+
+`POST /api/church-guide/admin/cookie`
+
+Same auth. Body `{"cookie": "connect.sid=..."}`. Rejects an empty/whitespace-only value immediately (`400`, no portal call). Otherwise validates the value against the real Groups Portal before saving: `422` if the portal rejects it, `503` if the portal couldn't be reached to check. On success (`200`), saves it via `portalcookie.Write` and returns the same shape as `/admin/status` — still never the value.
+
+```bash
+curl -u admin:$CHURCH_GUIDE_ADMIN_PASSWORD -X POST -d '{"cookie":"connect.sid=..."}' http://localhost:8080/api/church-guide/admin/cookie
+```
+
 ## Troubleshooting (transcript failures)
 
 - **Log shows** `Get "https://www.youtube.com/watch?...": EOF` **or** similar before any HTTP status: YouTube closed the TCP/TLS connection early (common with minimal or HTTP/2 clients). This repo vendors [`youtube-transcript-go`](backend/third_party/youtube-transcript-go) with a **browser-like User-Agent**, **extra headers**, and **HTTP/1.1-only** transport; rebuild/restart the Go server after updates.
@@ -262,6 +279,7 @@ After=network.target
 [Service]
 Type=simple
 Environment=LISTEN_ADDR=:8080
+Environment=CHURCH_GUIDE_ADMIN_PASSWORD=changeme
 ExecStart=/usr/local/bin/youtube-transcript
 Restart=on-failure
 RestartSec=5
@@ -272,6 +290,8 @@ WantedBy=multi-user.target
 ```
 
 The [Groups Portal session cookie](#church-guide-groups-portal) doesn't go through this unit at all — it's a file, updated independently by `scripts/update-groups-portal-cookie.sh`, and the running service picks it up without a restart.
+
+**`CHURCH_GUIDE_ADMIN_PASSWORD`** is inline here deliberately (unlike the cookie, it's not URL-encoded and Cody picks its value), but systemd still expands `%`-sequences in a unit file's own `Environment=` line — avoid a literal `%` in the password, or move it to an `EnvironmentFile=` instead.
 
 Install and enable:
 

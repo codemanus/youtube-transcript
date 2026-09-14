@@ -7,9 +7,11 @@ package portalcookie
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +20,10 @@ const DefaultPath = "/var/lib/youtube-transcript/groups-portal-cookie"
 
 // PathEnvVar overrides DefaultPath, for local development.
 const PathEnvVar = "GROUPS_PORTAL_COOKIE_PATH"
+
+// writeMu serializes Write calls, so two concurrent admin saves can't
+// interleave their directory-creation and temp-file steps.
+var writeMu sync.Mutex
 
 func path() string {
 	if p := strings.TrimSpace(os.Getenv(PathEnvVar)); p != "" {
@@ -29,18 +35,28 @@ func path() string {
 // Read returns the current cookie value, the time it was last written
 // (the file's mtime), and whether one is configured at all. A missing or
 // empty file is reported as not configured, not an error.
+//
+// It stats and reads through a single open file descriptor rather than
+// os.Stat followed by os.ReadFile, so a concurrent Write's rename can't pair
+// this call's reported mtime with a different Write's content.
 func Read() (value string, updatedAt time.Time, configured bool, err error) {
 	p := path()
 
-	info, err := os.Stat(p)
+	f, err := os.Open(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", time.Time{}, false, nil
 	}
 	if err != nil {
+		return "", time.Time{}, false, fmt.Errorf("open %s: %w", p, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
 		return "", time.Time{}, false, fmt.Errorf("stat %s: %w", p, err)
 	}
 
-	data, err := os.ReadFile(p)
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return "", time.Time{}, false, fmt.Errorf("read %s: %w", p, err)
 	}
@@ -56,13 +72,21 @@ func Read() (value string, updatedAt time.Time, configured bool, err error) {
 // needed, with owner-only permissions. It writes to a temporary file in the
 // same directory and renames it into place, so a concurrent Read (from a
 // live request) never observes a partially-written value, and the
-// owner-only permissions apply even if a file already existed at p.
+// owner-only permissions apply even if a file or directory already existed.
 func Write(value string) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	p := path()
 	dir := filepath.Dir(p)
 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	// MkdirAll only sets the mode on directories it creates; re-assert it in
+	// case dir already existed with broader permissions.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("chmod %s: %w", dir, err)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".groups-portal-cookie-*")
