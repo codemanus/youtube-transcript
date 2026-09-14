@@ -100,7 +100,7 @@ func (t *transcriptTool) call(ctx context.Context, _ *mcp.CallToolRequest, in tr
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read transcript response: %w", err)
+		return errorResult(fmt.Sprintf("could not read the transcript service's response: %v", err)), nil, nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -109,7 +109,7 @@ func (t *transcriptTool) call(ctx context.Context, _ *mcp.CallToolRequest, in tr
 
 	var out transcriptapi.Response
 	if err := json.Unmarshal(respBody, &out); err != nil {
-		return nil, nil, fmt.Errorf("decode transcript response: %w", err)
+		return errorResult(fmt.Sprintf("transcript service returned an unreadable response: %v", err)), nil, nil
 	}
 
 	return &mcp.CallToolResult{

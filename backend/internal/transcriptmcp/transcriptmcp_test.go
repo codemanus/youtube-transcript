@@ -350,6 +350,27 @@ func TestCallToolServiceError(t *testing.T) {
 	}
 }
 
+func TestCallToolMalformedResponse(t *testing.T) {
+	cs := newTestSession(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      toolName,
+		Arguments: map[string]any{"url": "https://youtu.be/abc12345678"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("want isError, got success: %s", textContent(t, res))
+	}
+	if got := textContent(t, res); !strings.Contains(got, "unreadable response") {
+		t.Errorf("error text = %q, want it to mention an unreadable response", got)
+	}
+}
+
 func TestCallToolUnreachable(t *testing.T) {
 	// Start and immediately close a real server so baseURL is a valid-looking
 	// address that nothing is listening on.
