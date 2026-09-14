@@ -1,6 +1,12 @@
-.PHONY: build build-frontend sync-static build-backend run-backend release-linux release-linux-arm64 release-for-host print-release-binary pull update update-linux update-release-host
+.PHONY: build build-frontend sync-static build-backend install-local run-backend release-linux release-linux-arm64 release-for-host print-release-binary pull update update-linux update-release-host
 
 build: build-frontend sync-static build-backend
+
+# Workstation (macOS/Linux): full native build, then install to a stable path
+# for Claude Desktop's MCP config (~/.local/bin/youtube-transcript).
+install-local: build
+	mkdir -p ~/.local/bin
+	install -m 755 dist/youtube-transcript ~/.local/bin/youtube-transcript
 
 build-frontend:
 	cd frontend && npm ci && npm run build

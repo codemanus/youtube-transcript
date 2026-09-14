@@ -19,8 +19,11 @@ import (
 	"time"
 
 	"github.com/codychambers/youtube-transcript/backend/internal/apilog"
+	"github.com/codychambers/youtube-transcript/backend/internal/transcriptapi"
+	"github.com/codychambers/youtube-transcript/backend/internal/transcriptmcp"
 	"github.com/codychambers/youtube-transcript/backend/internal/videoid"
 	"github.com/codychambers/youtube-transcript/backend/internal/youtubeoembed"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	youtube "github.com/rahadiangg/youtube-transcript-go/youtube"
 )
 
@@ -32,35 +35,41 @@ const (
 	defaultListen      = ":8080"
 	requestTimeout     = 45 * time.Second
 	rateLimitPerMinute = 30
+
+	// mcpClientTimeout is comfortably above the service's own requestTimeout so
+	// the service's own 504 response surfaces instead of a client-side timeout.
+	mcpClientTimeout = 90 * time.Second
 )
-
-type transcriptRequest struct {
-	URL               string `json:"url"`
-	Lang              string `json:"lang"`
-	IncludeTimestamps bool   `json:"includeTimestamps"`
-}
-
-type transcriptResponse struct {
-	VideoID         string  `json:"videoId"`
-	VideoTitle      string  `json:"videoTitle,omitempty"`
-	ChannelTitle    string  `json:"channelTitle,omitempty"`
-	Lang            string  `json:"lang"`
-	Language        string  `json:"language"`
-	IsGenerated     bool    `json:"isGenerated"`
-	Text            string  `json:"text"`
-	TextTimestamped *string `json:"textTimestamped,omitempty"`
-	SnippetCount    int     `json:"snippetCount"`
-}
-
-type errorResponse struct {
-	Error string `json:"error"`
-}
 
 type logsResponse struct {
 	Entries []apilog.Entry `json:"entries"`
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		runMCPServer()
+		return
+	}
+	runHTTPServer()
+}
+
+// runMCPServer serves get_youtube_transcript over stdio. Only protocol
+// messages go to stdout; diagnostics go to stderr via the log package.
+func runMCPServer() {
+	baseURL, err := transcriptmcp.BaseURLFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	client := &http.Client{Timeout: mcpClientTimeout}
+	server := transcriptmcp.NewServer(baseURL, client)
+
+	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func runHTTPServer() {
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = defaultListen
@@ -130,7 +139,7 @@ func handleTranscript(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 
-	var req transcriptRequest
+	var req transcriptapi.Request
 	if err := dec.Decode(&req); err != nil {
 		apilog.Warn("transcript bad json from %s: %v", r.RemoteAddr, err)
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -201,7 +210,7 @@ func handleTranscript(w http.ResponseWriter, r *http.Request) {
 	}
 
 	text := joinTranscriptText(ft.Snippets)
-	resp := transcriptResponse{
+	resp := transcriptapi.Response{
 		VideoID:      ft.VideoID,
 		VideoTitle:   videoTitle,
 		ChannelTitle: channelTitle,
@@ -319,7 +328,7 @@ func mapYouTubeError(err error) (int, string) {
 
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(errorResponse{Error: msg})
+	_ = json.NewEncoder(w).Encode(transcriptapi.ErrorResponse{Error: msg})
 }
 
 func logRequest(next http.Handler) http.Handler {

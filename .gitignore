@@ -5,6 +5,9 @@ frontend/.svelte-kit/
 dist/
 *.exe
 
+# Local issue tracker (see docs/agents/issue-tracker.md)
+.scratch/
+
 # Generated UI assets (see `backend/static/index.html` for bare go build)
 backend/static/*
 !backend/static/index.html
